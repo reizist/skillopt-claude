@@ -51,7 +51,8 @@ LR_BUDGET = int(os.environ.get("SKILLOPT_LR_BUDGET", "3"))   # L_t: max edits pe
 EPOCH_SIZE = int(os.environ.get("SKILLOPT_EPOCH_SIZE", "8"))  # sessions per epoch
 WINDOW = int(os.environ.get("SKILLOPT_WINDOW", "6"))          # reflection minibatch size
 AUTOAPPLY = os.environ.get("SKILLOPT_AUTOAPPLY") == "1"
-SCORE_CMD = os.environ.get("SKILLOPT_SCORE_CMD")              # optional external scorer
+SCORE_CMD = os.environ.get("SKILLOPT_SCORE_CMD")              # optional rollout scorer (forward pass)
+REPLAY_CMD = os.environ.get("SKILLOPT_REPLAY_CMD")           # optional empirical gate: re-run canaries
 
 LEARN_A, LEARN_B = "<!-- LEARNED_RULES_START -->", "<!-- LEARNED_RULES_END -->"
 SLOW_A, SLOW_B = "<!-- SLOW_UPDATE_START -->", "<!-- SLOW_UPDATE_END -->"
@@ -334,6 +335,7 @@ Be conservative: ties and uncertainty mean reject. Return ONLY:
 
 
 def gate(window: list[dict], current: str, candidate: str) -> dict:
+    """Predictive (judge) gate: used when no SKILLOPT_REPLAY_CMD canary scorer is configured."""
     if candidate.strip() == current.strip():
         return {"accept": False, "predicted_delta": 0.0, "reason": "no change"}
     user = json.dumps(
@@ -344,7 +346,62 @@ def gate(window: list[dict], current: str, candidate: str) -> dict:
         return {"accept": False, "predicted_delta": 0.0, "reason": "no verdict"}
     # strict improvement only (paper: ties rejected)
     verdict["accept"] = bool(verdict.get("accept")) and float(verdict.get("predicted_delta", 0)) > 0
+    verdict["gate"] = "judge"
     return verdict
+
+
+_FLOAT = re.compile(r"-?\d+(?:\.\d+)?")
+
+
+def _replay_score(skill_md: str) -> float | None:
+    """Run SKILLOPT_REPLAY_CMD against a candidate CLAUDE.md and read back a float score.
+
+    The full candidate file is written to a temp path exposed as $SKILLOPT_SKILL_MD; the
+    canary harness (see canary/run.sh) loads that as the CLAUDE.md under test and prints a
+    pass-rate float on stdout. Higher is better. Returns None on any failure.
+    """
+    if not REPLAY_CMD:
+        return None
+    import tempfile
+    tmp = None
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix="-CLAUDE.md", delete=False) as f:
+            f.write(skill_md)
+            tmp = f.name
+        out = subprocess.run(
+            REPLAY_CMD, shell=True, cwd=ROOT, capture_output=True, text=True,
+            timeout=int(os.environ.get("SKILLOPT_REPLAY_TIMEOUT", "1800")),
+            env={**os.environ, "SKILLOPT_SKILL_MD": tmp},
+        )
+        nums = _FLOAT.findall(out.stdout.strip().splitlines()[-1]) if out.stdout.strip() else []
+        return float(nums[-1]) if nums else None
+    except Exception as e:  # noqa: BLE001
+        log(f"replay scorer failed ({e})")
+        return None
+    finally:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
+def replay_gate(baseline_md: str, candidate_md: str) -> dict:
+    """Empirical (replay) gate: re-execute canary tasks under each skill and compare scores.
+
+    This is the faithful, paper-style validation gate — it measures a selection-set delta by
+    re-running tasks, rather than predicting it. Strict improvement only.
+    """
+    if candidate_md.strip() == baseline_md.strip():
+        return {"accept": False, "predicted_delta": 0.0, "reason": "no change", "gate": "replay"}
+    cur = _replay_score(baseline_md)
+    cand = _replay_score(candidate_md)
+    if cur is None or cand is None:
+        return {"accept": False, "predicted_delta": 0.0,
+                "reason": "replay produced no score", "gate": "replay"}
+    delta = round(cand - cur, 4)
+    return {"accept": cand > cur, "predicted_delta": delta,
+            "reason": f"replay score {cur} -> {cand}", "gate": "replay"}
 
 
 # ------------------------------------------------------------------- meta / epoch update
@@ -401,8 +458,10 @@ def cmd_reflect() -> None:
         return
 
     new_rules = apply_edits(rules, edits)
-    verdict = gate(window, rules, new_rules)
     candidate_md = set_region(md, LEARN_A, LEARN_B, new_rules)
+    # empirical replay gate when a canary scorer is configured, else the predictive judge
+    verdict = replay_gate(md, candidate_md) if REPLAY_CMD else gate(window, rules, new_rules)
+    log(f"gate={verdict.get('gate')} accept={verdict['accept']} ({verdict['reason']})")
 
     decision = {"ts": ev["ts"], "edits": edits, "verdict": verdict}
     append_jsonl("history.jsonl", decision)

@@ -17,8 +17,15 @@
 | `SKILLOPT_WINDOW` | `6` | reflection minibatch size, in sessions |
 | `SKILLOPT_EPOCH_SIZE` | `8` | decisions per epoch; triggers the meta update + rejected-buffer reset |
 | `SKILLOPT_AUTOAPPLY` | unset | `1` = write `CLAUDE.md` directly instead of staging to `proposal.md` |
-| `SKILLOPT_SCORE_CMD` | unset | shell command printing a float — replaces the heuristic with a real scorer |
+| `SKILLOPT_SCORE_CMD` | unset | shell command printing a float — replaces the heuristic **rollout** score (forward pass) |
+| `SKILLOPT_REPLAY_CMD` | unset | shell command printing a float — switches the **gate** from the predictive judge to an empirical canary replay (see [canary/](../canary/README.md)) |
+| `SKILLOPT_REPLAY_TIMEOUT` | `1800` | per-invocation timeout (seconds) for `SKILLOPT_REPLAY_CMD` |
 | `SKILLOPT_ROOT` | cwd | project root containing `CLAUDE.md` (set if the hook runs elsewhere) |
+
+> `SKILLOPT_SCORE_CMD` and `SKILLOPT_REPLAY_CMD` are different knobs: the former scores a
+> *past session* (forward pass), the latter scores a *candidate skill* by re-execution (the
+> validation gate). The replay command receives the candidate `CLAUDE.md` path as
+> `$SKILLOPT_SKILL_MD`.
 
 ## File layout
 
@@ -29,6 +36,7 @@ scripts/evolve.py             the loop: reflect / apply / status
 .claude/settings.json         Stop hook → `uv run scripts/evolve.py reflect`
 .claude/commands/evolve.md    /evolve slash command
 .claude/skillopt/             runtime state (below)
+canary/                       sample empirical-gate harness (opt-in via SKILLOPT_REPLAY_CMD)
 docs/                         DESIGN, CONFIGURATION, REFERENCES
 AGENTS.md                     agent operating guide
 ```
@@ -66,7 +74,8 @@ section above the markers; it is never auto-edited.
 
 - **Fully autonomous:** `SKILLOPT_AUTOAPPLY=1` — edits apply on every gated acceptance.
 - **Stronger optimizer:** `SKILLOPT_OPTIMIZER_MODEL=claude-opus-4-8`.
-- **Real replay gate:** `SKILLOPT_SCORE_CMD="uv run pytest -q canary/ | tail -1 | ..."`
-  (any command emitting a float; see [DESIGN.md](DESIGN.md) on the predictive-vs-replay gate).
+- **Real replay gate:** `SKILLOPT_REPLAY_CMD="bash canary/run.sh"` — swaps the predictive
+  judge for the empirical canary harness in [canary/](../canary/README.md). See
+  [DESIGN.md](DESIGN.md) on the predictive-vs-replay gate.
 - **Faster/slower adaptation:** raise `SKILLOPT_LR_BUDGET` and shrink `SKILLOPT_EPOCH_SIZE`
   to adapt aggressively; lower them for conservative, slow evolution.

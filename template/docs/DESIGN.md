@@ -27,7 +27,7 @@ assembled from only a handful of accepted edits. We make that artifact your `CLA
 | per-stream + final merge | `merge_failure`, `merge_success`, `merge_final` prompts | `merge()`, `merge_final()` |
 | edit ranking + LR budget `L_t` | LLM `ranking` then deterministic dedup/clip clamp | `ranking()`, `merge_and_rank()` |
 | bounded text update | localized add/replace/delete in the region | `apply_edits()` |
-| validation gate (strict `>`) | judge predicts a strictly positive delta | `gate()` |
+| validation gate (strict `>`) | judge predicts a positive delta, or empirical canary replay | `gate()` / `replay_gate()` |
 | rejected-edit buffer `B` | `rejected.jsonl`, reset each epoch | `cmd_reflect()` |
 | score cache `C` | `scores.json` keyed by `CLAUDE.md` hash | `cmd_reflect()` |
 | epoch-wise meta skill | `meta.md` (teacher) + `SLOW_UPDATE` block | `maybe_meta_update()` |
@@ -53,8 +53,12 @@ assembled from only a handful of accepted edits. We make that artifact your `CLA
    misbehaves.
 5. **Apply to a candidate.** `apply_edits()` produces candidate rules; `set_region()` splices
    them into a candidate `CLAUDE.md` (Core section and `SLOW_UPDATE` untouched).
-6. **Validation gate.** `gate()` asks a judge model whether the candidate would strictly
-   reduce friction without harming successes. Accept only if `predicted_delta > 0`.
+6. **Validation gate.** Two modes, both strict-improvement-only:
+   - *Predictive (default)* — `gate()` asks a judge model whether the candidate would strictly
+     reduce friction without harming successes; accept only if `predicted_delta > 0`.
+   - *Empirical (opt-in)* — when `SKILLOPT_REPLAY_CMD` is set, `replay_gate()` re-executes the
+     canary tasks under the current and the candidate `CLAUDE.md` and accepts only on a strictly
+     higher measured score. This is the faithful, paper-style gate (see [canary/](../canary/README.md)).
 7. **Bookkeeping.**
    - *Rejected* → append the edits to `rejected.jsonl` (buffer `B`) with the reason; nothing
      is written to `CLAUDE.md`.
@@ -73,10 +77,11 @@ replay one under a candidate `CLAUDE.md`. Hence:
 - **Online / streaming, not batch-epoch.** One session = one rollout; a sliding window is
   the minibatch; an "epoch" is `SKILLOPT_EPOCH_SIZE` decisions. `D_test` is simply your
   future sessions.
-- **Predictive gate, not replay gate.** Without re-execution we cannot measure a true
-  selection-set delta, so `gate()` *predicts* it with a judge model. This is the weakest
-  link versus the paper. If you have canary tasks/tests, point `SKILLOPT_SCORE_CMD` at a
-  command that prints a float and you recover a genuine replay-based score.
+- **Predictive gate by default, empirical gate available.** Out of the box `gate()` *predicts*
+  the selection-set delta with a judge model (the weakest link versus the paper, since nothing
+  is re-executed). Setting `SKILLOPT_REPLAY_CMD` switches to `replay_gate()`, which recovers the
+  paper's genuine re-execution score via the canary harness in [canary/](../canary/README.md) —
+  at the cost of running your canaries twice per reflection.
 - **Propose-only default.** The paper auto-accepts gated edits; we stage them and require
   `apply` (or opt-in `SKILLOPT_AUTOAPPLY=1`) so a human stays in the loop.
 - **Bounded edit surface.** Only the two marked regions are writable; the hand-authored
