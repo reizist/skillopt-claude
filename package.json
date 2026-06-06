@@ -1,0 +1,41 @@
+{
+  "name": "skillopt-claude",
+  "version": "0.1.0",
+  "description": "Scaffold a self-evolving CLAUDE.md (the SkillOpt training loop, arXiv:2605.23904) into any project",
+  "type": "module",
+  "bin": {
+    "skillopt-claude": "bin/cli.mjs"
+  },
+  "files": [
+    "bin",
+    "template"
+  ],
+  "engines": {
+    "node": ">=16"
+  },
+  "scripts": {
+    "scaffold": "node bin/cli.mjs"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "skillopt",
+    "self-evolving",
+    "agents",
+    "boilerplate",
+    "scaffold"
+  ],
+  "license": "MIT",
+  "author": "reizist",
+  "homepage": "https://github.com/reizist/skillopt-claude#readme",
+  "bugs": {
+    "url": "https://github.com/reizist/skillopt-claude/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/reizist/skillopt-claude.git"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

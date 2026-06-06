@@ -1,0 +1,8 @@
+# SkillOpt state directory.
+# Generated at runtime:
+#   scores.json    hash(CLAUDE.md) -> selection score (cache C)
+#   rejected.jsonl epoch-local rejected-edit buffer (B)
+#   meta.md        optimizer-side meta skill (teacher only, never deployed)
+#   evidence.jsonl rolling session evidence (forward-pass rollouts)
+#   proposal.md    last proposed patch (propose-only mode)
+#   history.jsonl  accepted/rejected decision log

@@ -1,0 +1,13 @@
+[project]
+name = "skillopt-claude"
+version = "0.1.0"
+description = "Self-evolving CLAUDE.md via the SkillOpt training loop (arXiv:2605.23904)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "anthropic>=0.40.0",
+]
+
+# This is a script project, not a distributable package: uv manages the env, nothing builds.
+[tool.uv]
+package = false
