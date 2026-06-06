@@ -1,3 +1,11 @@
 node_modules/
 *.tgz
 .DS_Store
+
+# Python artifacts created if you run the template's loop in-place during development.
+# (Inside a scaffolded project these are covered by the template's own .gitignore.)
+.venv/
+__pycache__/
+*.pyc
+template/.claude/skillopt/*
+!template/.claude/skillopt/.gitkeep

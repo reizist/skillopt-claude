@@ -56,6 +56,7 @@ scripts/evolve.py             the SkillOpt loop (reflect / apply / status)
 .claude/settings.json         Stop hook → reflect after every session
 .claude/commands/evolve.md    /evolve slash command
 .claude/skillopt/             runtime state (scores, rejected buffer, meta, evidence)
+canary/                       optional empirical-gate harness (SKILLOPT_REPLAY_CMD)
 docs/                         design, configuration, references
 AGENTS.md                     agent-facing operating guide
 ```
