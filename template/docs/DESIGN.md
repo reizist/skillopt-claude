@@ -22,9 +22,10 @@ assembled from only a handful of accepted edits. We make that artifact your `CLA
 | protected slow-update field | `SLOW_UPDATE` region of `CLAUDE.md` | `maybe_meta_update()` |
 | forward pass (rollouts) | one finished session → transcript evidence | `collect_evidence()` |
 | rollout score `r(s)` | corrections + tool errors per turn (or external cmd) | `heuristic_score()` |
-| backward pass (reflection) | optimizer proposes `add/replace/delete` edits | `propose_edits()` |
-| failure/success minibatches | window split by `outcome` | `propose_edits()` |
-| edit merge + LR budget `L_t` | dedup, failure-first rank, clip | `merge_and_rank()` |
+| backward pass (reflection) | staged analyst → merge → ranking | `run_optimizer()` |
+| failure/success minibatches | window split by `outcome`, analyzed separately | `analyst()` |
+| per-stream + final merge | `merge_failure`, `merge_success`, `merge_final` prompts | `merge()`, `merge_final()` |
+| edit ranking + LR budget `L_t` | LLM `ranking` then deterministic dedup/clip clamp | `ranking()`, `merge_and_rank()` |
 | bounded text update | localized add/replace/delete in the region | `apply_edits()` |
 | validation gate (strict `>`) | judge predicts a strictly positive delta | `gate()` |
 | rejected-edit buffer `B` | `rejected.jsonl`, reset each epoch | `cmd_reflect()` |
@@ -40,12 +41,16 @@ assembled from only a handful of accepted edits. We make that artifact your `CLA
    `success`/`fail`. The evidence unit is appended to `evidence.jsonl`.
 2. **Minibatch.** Take the last `SKILLOPT_WINDOW` evidence units and split into failure and
    success minibatches — the paper analyzes the two separately.
-3. **Backward pass.** `propose_edits()` sends the current rules, the meta-skill guidance,
-   both minibatches, and the recent rejected buffer to the optimizer model, which returns a
-   JSON array of bounded edits (each generalizable, not task-specific, not a duplicate of a
-   rejected edit).
-4. **Merge + clip.** `merge_and_rank()` dedups, ranks failure-corrections (replace/delete)
-   above pure additions, and clips to `SKILLOPT_LR_BUDGET` (`L_t`).
+3. **Backward pass (staged).** `run_optimizer()` mirrors the paper's Appendix C.2 pipeline:
+   the failure and success minibatches go to separate analysts (`analyst_error` /
+   `analyst_success`), each stream is consolidated on its own (`merge_failure` /
+   `merge_success`), the two are reconciled with **failure priority** (`merge_final`), and
+   the result is ranked under the budget (`ranking`). The failure analyst also receives the
+   recent rejected buffer so it does not re-propose dead ends. Empty streams are skipped, so
+   a clean window costs few or no optimizer calls.
+4. **Clamp.** `merge_and_rank()` is a deterministic safety net after the LLM ranking: it
+   removes exact duplicates and hard-clips to `SKILLOPT_LR_BUDGET` (`L_t`) even if a stage
+   misbehaves.
 5. **Apply to a candidate.** `apply_edits()` produces candidate rules; `set_region()` splices
    them into a candidate `CLAUDE.md` (Core section and `SLOW_UPDATE` untouched).
 6. **Validation gate.** `gate()` asks a judge model whether the candidate would strictly

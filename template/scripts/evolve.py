@@ -9,8 +9,8 @@ Adapts the SkillOpt training loop (arXiv:2605.23904) to Claude Code. The mapping
     protected slow-update field   the SLOW_UPDATE region of CLAUDE.md
     forward pass (rollouts)       one finished Claude Code session (the transcript)
     rollout score r(s)            heuristic_score() over transcript signals
-    backward pass (reflection)    optimizer model proposes bounded add/replace/delete
-    edit merge + LR budget        merge_and_rank(), clipped to L_t
+    backward pass (reflection)    run_optimizer(): staged analyst -> merge -> ranking
+    edit merge + LR budget        ranking() + merge_and_rank() clamp, clipped to L_t
     validation gate (strict >)    gate(): judge-predicted delta, strict improvement only
     rejected-edit buffer B        .claude/skillopt/rejected.jsonl (epoch-local)
     score cache C                 .claude/skillopt/scores.json
@@ -196,37 +196,110 @@ def _ask_json(system: str, user: str) -> dict | list:
     return json.loads(m.group(1))
 
 
-PROPOSE_SYS = """You are the SkillOpt optimizer. You improve a project's CLAUDE.md by
-proposing BOUNDED edits to its LEARNED_RULES region only. Rules must be generalizable
-procedural knowledge that would prevent the observed failures or amplify observed
-successes — never task-specific hacks, never restatements of existing rules.
+# The backward pass mirrors SkillOpt's staged optimizer (paper Appendix C.2): the failure
+# and success minibatches are analyzed by separate analysts, each stream is merged on its
+# own, the two are merged with failure priority, and the result is ranked under the LR
+# budget. (The public mastercodeai/skillopt-methodology-skill repo, MIT, extracts these
+# same prompt stages — analyst_error / analyst_success / merge_* / ranking — from the paper.)
 
-Return ONLY a JSON array of edits, each:
+_EDIT_SHAPE = """Each edit is:
   {"op":"add|replace|delete","target":"<existing rule text, for replace/delete>",
    "content":"<new rule, for add/replace>","rationale":"<why, 1 line>"}
-Propose at most %d edits. Prefer the smallest change that addresses a systematic pattern.
-Do NOT repeat anything in the rejected-edit buffer.""" % LR_BUDGET
+Rules must be generalizable procedural knowledge — never task-specific hacks, never a
+restatement of an existing rule. Return ONLY a JSON array of edits."""
+
+ANALYST_ERROR_SYS = (
+    "You are the SkillOpt FAILURE analyst. Examine a minibatch of failed sessions "
+    "(corrections, tool errors) against the current LEARNED_RULES. Identify the common, "
+    "SYSTEMATIC error patterns — not one-off mistakes — and propose bounded edits that "
+    "would prevent them. Do NOT repeat anything in the rejected-edit buffer.\n" + _EDIT_SHAPE
+)
+ANALYST_SUCCESS_SYS = (
+    "You are the SkillOpt SUCCESS analyst. Examine a minibatch of successful sessions "
+    "against the current LEARNED_RULES. Identify behaviors worth preserving or amplifying "
+    "and propose at most a few bounded edits that reinforce them. Be conservative — "
+    "successes usually need few or no edits.\n" + _EDIT_SHAPE
+)
+MERGE_FAILURE_SYS = (
+    "You are the SkillOpt merge stage for FAILURE edits. Consolidate the proposed "
+    "failure-correction edits: drop duplicates and near-duplicates, resolve contradictions, "
+    "prefer the more general phrasing.\n" + _EDIT_SHAPE
+)
+MERGE_SUCCESS_SYS = (
+    "You are the SkillOpt merge stage for SUCCESS edits. Consolidate the proposed "
+    "success-reinforcing edits: drop duplicates, resolve contradictions, prefer the more "
+    "general phrasing.\n" + _EDIT_SHAPE
+)
+MERGE_FINAL_SYS = (
+    "You are the SkillOpt FINAL merge. Combine the consolidated failure edits and success "
+    "edits into one coherent set. On any conflict, FAILURE corrections take priority. Drop "
+    "redundancies.\n" + _EDIT_SHAPE
+)
+RANKING_SYS = (
+    "You are the SkillOpt ranking stage. Rank the merged edits by expected utility "
+    "(impact on preventing failures x generalizability) and return ONLY the top %d, "
+    "highest utility first.\n" % LR_BUDGET + _EDIT_SHAPE
+)
 
 
-def propose_edits(window: list[dict], rules: str, rejected: list[dict], meta: str) -> list[dict]:
+def _ask_edits(system: str, payload: dict) -> list[dict]:
+    res = _ask_json(system, json.dumps(payload, ensure_ascii=False))
+    return res if isinstance(res, list) else []
+
+
+def analyst(kind: str, minibatch: list[dict], rules: str, rejected: list[dict], meta: str) -> list[dict]:
+    sys_prompt = ANALYST_ERROR_SYS if kind == "fail" else ANALYST_SUCCESS_SYS
+    key = "failure_minibatch" if kind == "fail" else "success_minibatch"
+    payload = {
+        "current_learned_rules": rules.strip() or "(empty)",
+        "meta_skill_guidance": meta.strip() or "(none)",
+        key: minibatch,
+    }
+    if kind == "fail":
+        payload["rejected_edit_buffer"] = [r.get("edit") for r in rejected][-12:]
+    return _ask_edits(sys_prompt, payload)
+
+
+def merge(edits: list[dict], kind: str) -> list[dict]:
+    if len(edits) <= 1:
+        return edits
+    sys_prompt = MERGE_FAILURE_SYS if kind == "fail" else MERGE_SUCCESS_SYS
+    return _ask_edits(sys_prompt, {"edits": edits}) or edits
+
+
+def merge_final(failure_edits: list[dict], success_edits: list[dict]) -> list[dict]:
+    # nothing to reconcile unless both streams produced edits
+    if not failure_edits or not success_edits:
+        return failure_edits + success_edits
+    return _ask_edits(MERGE_FINAL_SYS,
+                      {"failure_edits": failure_edits, "success_edits": success_edits}) \
+        or (failure_edits + success_edits)
+
+
+def ranking(edits: list[dict]) -> list[dict]:
+    if len(edits) <= LR_BUDGET:
+        return edits
+    return _ask_edits(RANKING_SYS, {"edits": edits}) or edits
+
+
+def run_optimizer(window: list[dict], rules: str, rejected: list[dict], meta: str) -> list[dict]:
+    """Staged backward pass: analyst -> per-stream merge -> final merge -> ranking.
+
+    Empty streams are skipped, so a clean window costs few or no optimizer calls.
+    """
     fails = [e for e in window if e["outcome"] == "fail"]
     succ = [e for e in window if e["outcome"] == "success"]
-    user = json.dumps(
-        {
-            "current_learned_rules": rules.strip() or "(empty)",
-            "meta_skill_guidance": meta.strip() or "(none)",
-            "failure_minibatch": fails,
-            "success_minibatch": succ,
-            "rejected_edit_buffer": [r.get("edit") for r in rejected][-12:],
-        },
-        ensure_ascii=False,
-    )
-    edits = _ask_json(PROPOSE_SYS, user)
-    return edits if isinstance(edits, list) else []
+    fail_edits = merge(analyst("fail", fails, rules, rejected, meta), "fail") if fails else []
+    succ_edits = merge(analyst("success", succ, rules, rejected, meta), "success") if succ else []
+    return ranking(merge_final(fail_edits, succ_edits))
 
 
 def merge_and_rank(edits: list[dict]) -> list[dict]:
-    """Consolidate duplicates, drop empties, clip to the LR budget L_t."""
+    """Local safety clamp after the staged optimizer: dedup, drop empties, hard-clip to L_t.
+
+    The LLM ranking stage already orders and trims, but this guarantees the budget and
+    removes exact duplicates deterministically even if a stage misbehaves.
+    """
     seen, merged = set(), []
     for e in edits:
         key = (e.get("op"), (e.get("content") or e.get("target") or "").strip()[:80])
@@ -322,7 +395,7 @@ def cmd_reflect() -> None:
     rejected = read_jsonl("rejected.jsonl")
     meta = read_state("meta.md")
 
-    edits = merge_and_rank(propose_edits(window, rules, rejected, meta))
+    edits = merge_and_rank(run_optimizer(window, rules, rejected, meta))
     if not edits:
         log("no edits proposed")
         return

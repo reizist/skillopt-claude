@@ -55,7 +55,8 @@ every session. The `/evolve` slash command wraps these.
 | --- | --- |
 | Add detected failure signals (e.g. new languages) | `CORRECTION` regex in `scripts/evolve.py` |
 | Change how rollout score is computed | `heuristic_score()` or set `SKILLOPT_SCORE_CMD` |
-| Change the optimizer/judge prompts | `PROPOSE_SYS` / `GATE_SYS` / `META_SYS` |
+| Change the optimizer/judge prompts | staged `ANALYST_*_SYS` / `MERGE_*_SYS` / `RANKING_SYS` / `GATE_SYS` / `META_SYS` |
+| Change the optimizer stage wiring | `run_optimizer()` (analyst → merge → final → ranking) |
 | Change edit budget / window / epoch size | env vars in [docs/CONFIGURATION.md](docs/CONFIGURATION.md) |
 | Add a true replay gate | implement a canary command, point `SKILLOPT_SCORE_CMD` at it |
 | Change what counts as evidence | `collect_evidence()` (reads the transcript JSONL) |
